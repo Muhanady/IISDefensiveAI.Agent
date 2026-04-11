@@ -1,0 +1,32 @@
+# Build
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rider / VS Code
+.idea/
+.vscode/
+
+# Docker
+*.env
+
+# ASP.NET
+appsettings.Development.json
+
+# Test results
+TestResults/
+
+# NuGet
+*.nupkg
+packages/
