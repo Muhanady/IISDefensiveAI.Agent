@@ -20,16 +20,21 @@ public class LogEntry
 
     public class LogProperties
     {
-        [JsonPropertyName("ElapsedMilliseconds")]
-        public double? ElapsedMilliseconds { get; set; }
+        private double? _elapsedMs;
 
-        /// <summary>Some sinks emit <c>Elapsed</c> instead of <c>ElapsedMilliseconds</c>; same backing value.</summary>
         [JsonPropertyName("Elapsed")]
-        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWriting)]
-        public double? Elapsed
+        public double? ElapsedMilliseconds
         {
-            get => ElapsedMilliseconds;
-            set => ElapsedMilliseconds = value;
+            get => _elapsedMs;
+            set => _elapsedMs = value;
+        }
+
+        /// <summary>Deserializes JSON <c>ElapsedMilliseconds</c> into <see cref="ElapsedMilliseconds"/>.</summary>
+        [JsonPropertyName("ElapsedMilliseconds")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWriting)]
+        public double? ElapsedMillisecondsMs
+        {
+            set => _elapsedMs = value;
         }
 
         public int? StatusCode { get; set; }

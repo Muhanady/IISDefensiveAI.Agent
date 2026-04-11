@@ -12,7 +12,7 @@ namespace IISDefensiveAI.Agent;
 
 public class LogMonitoringService : BackgroundService
 {
-    private const int ElapsedMsBufferCapacity = 10;
+    private const int ElapsedMsBufferCapacity = 20;
     private const int SpikePValueHistoryLength = 35;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -471,6 +471,8 @@ public class LogMonitoringService : BackgroundService
             _elapsedMillisecondsBuffer.Add(value);
             while (_elapsedMillisecondsBuffer.Count > ElapsedMsBufferCapacity)
                 _elapsedMillisecondsBuffer.RemoveAt(0);
+
+            _logger.LogInformation("Buffer count: {Count}/20", _elapsedMillisecondsBuffer.Count);
 
             if (_elapsedMillisecondsBuffer.Count >= ElapsedMsBufferCapacity)
                 shouldNotifyAnomaly = TryDetectSpikeWithIidSpikeDetector(value, out var isSpike) && isSpike;
