@@ -12,7 +12,7 @@ namespace IISDefensiveAI.Agent;
 
 public class LogMonitoringService : BackgroundService
 {
-    private const int ElapsedMsBufferCapacity = 100;
+    private const int ElapsedMsBufferCapacity = 10;
     private const int SpikePValueHistoryLength = 35;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
