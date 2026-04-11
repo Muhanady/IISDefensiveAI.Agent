@@ -12,16 +12,13 @@ namespace IISDefensiveAI.Agent;
 
 public class LogMonitoringService : BackgroundService
 {
-    private const int ElapsedMsBufferCapacity = 20;
-    private const int SpikePValueHistoryLength = 35;
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
     };
 
     private readonly MLContext _mlContext = new(seed: 0);
-    private readonly List<float> _elapsedMillisecondsBuffer = new(capacity: ElapsedMsBufferCapacity);
+    private readonly List<float> _elapsedMillisecondsBuffer;
     private readonly object _mlBufferLock = new();
 
     private readonly LogMonitoringOptions _options;
@@ -52,6 +49,7 @@ public class LogMonitoringService : BackgroundService
         IHostEnvironment hostEnvironment)
     {
         _options = options.Value;
+        _elapsedMillisecondsBuffer = new List<float>(_options.ElapsedMsBufferCapacity);
         _iisController = iisController;
         _postActionAudit = postActionAudit;
         _anomalyTelemetry = anomalyTelemetry;
@@ -399,6 +397,9 @@ public class LogMonitoringService : BackgroundService
             offset += read;
         }
 
+        if (offset > 0)
+            _logger.LogDebug("Read {ByteCount} bytes from {File}", offset, fullPath);
+
         _filePositions[fullPath] = length;
 
         var chunk = Encoding.UTF8.GetString(buffer, 0, offset);
@@ -426,15 +427,29 @@ public class LogMonitoringService : BackgroundService
     {
         try
         {
-            var entry = JsonSerializer.Deserialize<LogEntry>(line, JsonOptions);
+            // Trim the BOM and other hidden whitespace characters
+            var cleanedLine = line.Trim('\uFEFF', '\u200B').Trim();
+
+            if (string.IsNullOrWhiteSpace(cleanedLine))
+                return;
+
+            var entry = JsonSerializer.Deserialize<LogEntry>(cleanedLine, JsonOptions);
             if (entry is null)
                 return;
+
+            _logger.LogInformation(
+                "Internal Heartbeat | Processing Log: {Template} | Latency: {Ms}ms",
+                entry.MessageTemplate,
+                entry.Properties?.ElapsedMilliseconds);
 
             ProcessLogEntry(entry);
         }
         catch (JsonException ex)
         {
-            _logger.LogDebug(ex, "Skipping non-JSON or invalid log line.");
+            _logger.LogWarning(
+                "JSON Parse Failure. Line starts with: {Start}. Error: {Msg}",
+                line.Substring(0, Math.Min(10, line.Length)),
+                ex.Message);
         }
     }
 
@@ -450,7 +465,10 @@ public class LogMonitoringService : BackgroundService
 
         var elapsed = entry.Properties?.ElapsedMilliseconds;
         if (elapsed is null)
+        {
+            _logger.LogDebug("Skipping entry because ElapsedMilliseconds is null. Message: {Message}", entry.MessageTemplate);
             return;
+        }
 
         var value = (float)elapsed.Value;
         if (!float.IsFinite(value))
@@ -469,12 +487,12 @@ public class LogMonitoringService : BackgroundService
         lock (_mlBufferLock)
         {
             _elapsedMillisecondsBuffer.Add(value);
-            while (_elapsedMillisecondsBuffer.Count > ElapsedMsBufferCapacity)
+            while (_elapsedMillisecondsBuffer.Count > _options.ElapsedMsBufferCapacity)
                 _elapsedMillisecondsBuffer.RemoveAt(0);
 
-            _logger.LogInformation("Buffer count: {Count}/20", _elapsedMillisecondsBuffer.Count);
+            _logger.LogInformation("Added to buffer. Current count: {Count}/{Capacity}", _elapsedMillisecondsBuffer.Count, _options.ElapsedMsBufferCapacity);
 
-            if (_elapsedMillisecondsBuffer.Count >= ElapsedMsBufferCapacity)
+            if (_elapsedMillisecondsBuffer.Count >= _options.ElapsedMsBufferCapacity)
                 shouldNotifyAnomaly = TryDetectSpikeWithIidSpikeDetector(value, out var isSpike) && isSpike;
         }
 
@@ -517,7 +535,7 @@ public class LogMonitoringService : BackgroundService
                 outputColumnName: nameof(SpikePredictionRow.Prediction),
                 inputColumnName: nameof(ElapsedObservation.Value),
                 confidence: 95d,
-                pvalueHistoryLength: SpikePValueHistoryLength,
+                pvalueHistoryLength: _options.SpikePValueHistoryLength,
                 side: AnomalySide.TwoSided);
 
             ITransformer model = estimator.Fit(dataView);
@@ -555,7 +573,8 @@ public class LogMonitoringService : BackgroundService
             "Critical anomaly: repeated SQL timeout signals within lookback were followed by a latency spike. MessageTemplate: {MessageTemplate}",
             entry.MessageTemplate);
 
-        ScheduleCriticalAnomalyRootCauseLogging(entry);
+        if (_options.EnableAutoRca)
+            ScheduleCriticalAnomalyRootCauseLogging(entry);
 
         var poolName = _options.AnomalyReactionAppPoolName?.Trim();
         if (string.IsNullOrEmpty(poolName))
@@ -594,7 +613,7 @@ public class LogMonitoringService : BackgroundService
             {
                 try
                 {
-                    await _diagnosticReasoning.AppendRcaToDiagnosticsLogAsync(entry, contentRoot, stopping);
+                    await _diagnosticReasoning.AppendRcaToDiagnosticsLogAsync(entry, contentRoot, "diagnostics_rca.log", stopping);
                 }
                 catch (OperationCanceledException)
                 {

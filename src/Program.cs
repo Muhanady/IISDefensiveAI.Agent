@@ -66,4 +66,28 @@ app.MapPost("/mark-safe", (MarkSafeRequest body, IISController iis) =>
     return Results.Ok(new { ok = true, requestPath = path, latencyMs = body.LatencyMs });
 });
 
+app.MapPost(
+    "/analyze-logs",
+    (DiagnosticReasoningService reasoning, IOptions<LogMonitoringOptions> opts, IHostEnvironment env) =>
+    {
+        var o = opts.Value;
+        var rawDir = o.LogDirectory?.Trim();
+        if (string.IsNullOrWhiteSpace(rawDir))
+            return Results.BadRequest(new { success = false, error = "LogMonitoring:LogDirectory is not configured." });
+
+        var directory = Path.IsPathRooted(rawDir)
+            ? Path.GetFullPath(rawDir)
+            : Path.GetFullPath(Path.Combine(env.ContentRootPath, rawDir));
+
+        if (!Directory.Exists(directory))
+            return Results.NotFound(new { success = false, error = "Log directory does not exist.", path = directory });
+
+        var filter = string.IsNullOrWhiteSpace(o.FileFilter) ? "*.json" : o.FileFilter.Trim();
+        var contentRoot = env.ContentRootPath;
+
+        _ = Task.Run(() => reasoning.AnalyzeLogFolderAsync(directory, filter, contentRoot, CancellationToken.None));
+
+        return Results.Json(new { success = true, message = "Batch log analysis has started." });
+    });
+
 app.Run();

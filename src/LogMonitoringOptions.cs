@@ -18,4 +18,16 @@ public class LogMonitoringOptions
 
     /// <summary>Minimum SQL-timeout log signals required in the lookback window for an anomaly to be treated as critical.</summary>
     public int SqlTimeoutsRequiredForCritical { get; set; } = 2;
+
+    /// <summary>Capacity for the per-path elapsed-millisecond ring buffer.</summary>
+    public int ElapsedMsBufferCapacity { get; set; } = 100;
+
+    /// <summary>Number of recent p-value samples retained for spike detection history.</summary>
+    public int SpikePValueHistoryLength { get; set; } = 35;
+
+    /// <summary>When true, critical anomalies trigger real-time Ollama root-cause analysis.</summary>
+    public bool EnableAutoRca { get; set; } = true;
+
+    /// <summary>Optional directory for RCA / diagnostic log output; when null or empty, output uses the app content root.</summary>
+    public string? DiagnosisDirectory { get; set; }
 }

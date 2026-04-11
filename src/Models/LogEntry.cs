@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace IISDefensiveAI.Agent.Models;
@@ -20,21 +21,15 @@ public class LogEntry
 
     public class LogProperties
     {
-        private double? _elapsedMs;
-
-        [JsonPropertyName("Elapsed")]
-        public double? ElapsedMilliseconds
-        {
-            get => _elapsedMs;
-            set => _elapsedMs = value;
-        }
+        [JsonPropertyName("Elapsed")] // Map 'Elapsed' from real logs to this property
+        public double? ElapsedMilliseconds { get; set; }
 
         /// <summary>Deserializes JSON <c>ElapsedMilliseconds</c> into <see cref="ElapsedMilliseconds"/>.</summary>
         [JsonPropertyName("ElapsedMilliseconds")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWriting)]
-        public double? ElapsedMillisecondsMs
+        public double? ElapsedMillisecondsJson
         {
-            set => _elapsedMs = value;
+            set => ElapsedMilliseconds = value;
         }
 
         public int? StatusCode { get; set; }
@@ -45,5 +40,9 @@ public class LogEntry
 
         /// <summary>HTTP request path when present in Serilog/ASP.NET structured logs.</summary>
         public string? RequestPath { get; set; }
+
+        /// <summary>Captures additional Serilog properties not mapped to named members (e.g. exceptionResponseList).</summary>
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? ExtensionData { get; set; }
     }
 }
