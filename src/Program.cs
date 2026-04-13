@@ -27,7 +27,8 @@ builder.Services.AddSingleton<IISController>();
 builder.Services.AddSingleton<PostActionAuditService>();
 builder.Services.AddSingleton<AnomalyTelemetry>();
 builder.Services.AddHostedService<LogMonitoringService>();
-builder.Services.AddHostedService<NightlyLearningService>();
+builder.Services.AddSingleton<NightlyLearningService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<NightlyLearningService>());
 
 var app = builder.Build();
 
@@ -89,5 +90,11 @@ app.MapPost(
 
         return Results.Json(new { success = true, message = "Batch log analysis has started." });
     });
+
+app.MapPost("/rebaseline", (NightlyLearningService nightly) =>
+{
+    _ = Task.Run(() => nightly.RunLearningJobAsync(CancellationToken.None));
+    return Results.Ok(new { message = "Baseline regeneration has started." });
+});
 
 app.Run();

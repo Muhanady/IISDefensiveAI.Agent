@@ -27,6 +27,7 @@ public class NightlyLearningService : IHostedService
     private readonly IHostEnvironment _hostEnvironment;
     private readonly IISController _iisController;
     private readonly ILogger<NightlyLearningService> _logger;
+    private readonly SemaphoreSlim _learningJobGate = new(1, 1);
     private CancellationTokenSource? _cts;
     private Task? _schedulerTask;
 
@@ -115,7 +116,23 @@ public class NightlyLearningService : IHostedService
         }
     }
 
-    private async Task RunLearningJobAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Rebuilds <c>baseline_profile.json</c> from recent logs. Serialized with the nightly scheduler so overlapping runs do not write concurrently.
+    /// </summary>
+    public async Task RunLearningJobAsync(CancellationToken cancellationToken)
+    {
+        await _learningJobGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await RunLearningJobCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _learningJobGate.Release();
+        }
+    }
+
+    private async Task RunLearningJobCoreAsync(CancellationToken cancellationToken)
     {
         var directory = ResolveLogDirectory();
         if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
