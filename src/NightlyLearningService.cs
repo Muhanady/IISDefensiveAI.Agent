@@ -168,7 +168,14 @@ public class NightlyLearningService : IHostedService
         foreach (var path in jsonFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await foreach (var line in File.ReadLinesAsync(path, cancellationToken))
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+
+            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
             {
                 if (string.IsNullOrWhiteSpace(line))
                     continue;
