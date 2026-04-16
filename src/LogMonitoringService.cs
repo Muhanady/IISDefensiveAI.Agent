@@ -207,6 +207,21 @@ public class LogMonitoringService : BackgroundService
         }
     }
 
+    /// <summary>Returns baseline statistics for a normalized request path when <c>baseline_profile.json</c> is loaded.</summary>
+    public bool TryGetPathBaselineStats(string normalizedRequestPath, out PathBaselineStats? stats)
+    {
+        lock (_baselineLock)
+        {
+            if (_baseline?.Paths is null || !_baseline.Paths.TryGetValue(normalizedRequestPath, out stats))
+            {
+                stats = null;
+                return false;
+            }
+
+            return true;
+        }
+    }
+
     private FileSystemWatcher? CreateBaselineProfileWatcher()
     {
         var root = _hostEnvironment.ContentRootPath;
@@ -274,7 +289,7 @@ public class LogMonitoringService : BackgroundService
         return elapsedMs >= low && elapsedMs <= high;
     }
 
-    private PathBaselineStats? TryGetPathBaselineStats(LogEntry entry)
+    private PathBaselineStats? TryGetPathBaselineStatsForEntry(LogEntry entry)
     {
         lock (_baselineLock)
         {
@@ -626,7 +641,7 @@ public class LogMonitoringService : BackgroundService
         var recycled = _iisController.RecycleAppPool(poolName);
         if (recycled)
         {
-            var baselineStats = TryGetPathBaselineStats(entry);
+            var baselineStats = TryGetPathBaselineStatsForEntry(entry);
             _postActionAudit.BeginAfterSuccessfulRecycle(
                 entry,
                 baselineStats,

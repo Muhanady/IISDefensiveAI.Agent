@@ -6,6 +6,12 @@ namespace IISDefensiveAI.Agent;
 
 public class LogAnalyticsService
 {
+    private const double FallbackLongLatencyThresholdMs = 500d;
+
+    private const double MinDensityHoursForThroughput = 0.01;
+
+    private const string AnalyticsFilterApplied = "ErrorsOnly_Or_LatencyOutliers";
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -19,6 +25,7 @@ public class LogAnalyticsService
 
     private readonly LogAnalyticsOptions _options;
     private readonly LogMonitoringOptions _monitoringOptions;
+    private readonly LogMonitoringService _logMonitoring;
     private readonly IHostEnvironment _hostEnvironment;
     private readonly ILogger<LogAnalyticsService> _logger;
     private readonly SemaphoreSlim _historyWriteGate = new(1, 1);
@@ -26,39 +33,42 @@ public class LogAnalyticsService
     public LogAnalyticsService(
         IOptions<LogAnalyticsOptions> options,
         IOptions<LogMonitoringOptions> monitoringOptions,
+        LogMonitoringService logMonitoring,
         IHostEnvironment hostEnvironment,
         ILogger<LogAnalyticsService> logger)
     {
         _options = options.Value;
         _monitoringOptions = monitoringOptions.Value;
+        _logMonitoring = logMonitoring;
         _hostEnvironment = hostEnvironment;
         _logger = logger;
     }
 
-    public async Task<List<ApiAnalyticsResponse>> GetStatsAsync(CancellationToken cancellationToken)
+    public async Task<AnalyticsReport> GetStatsAsync(CancellationToken cancellationToken)
     {
         var directory = ResolveLogDirectory();
         if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
         {
             _logger.LogWarning(
                 "Log analytics skipped: directory missing or not configured (LogAnalytics:LogDirectory).");
-            var empty = new List<ApiAnalyticsResponse>();
-            await TryWriteAnalyticsHistorySnapshotAsync(
-                    empty,
-                    totalHours: 0,
-                    logWindowStartUtc: null,
-                    logWindowEndUtc: null,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            return empty;
+            var emptyReport = new AnalyticsReport
+            {
+                LogSampleWindowStartUtc = null,
+                LogSampleWindowEndUtc = null,
+                GlobalDensityHours = 0,
+                FilterApplied = AnalyticsFilterApplied,
+                Stats = Array.Empty<ApiAnalyticsResponse>(),
+            };
+            await TryWriteAnalyticsHistorySnapshotAsync(emptyReport, cancellationToken).ConfigureAwait(false);
+            return emptyReport;
         }
 
         var filter = string.IsNullOrWhiteSpace(_options.FileFilter) ? "*.json" : _options.FileFilter.Trim();
         var files = Directory.EnumerateFiles(directory, filter, SearchOption.TopDirectoryOnly).ToList();
 
         var accumulators = new Dictionary<string, PathAccumulator>(StringComparer.OrdinalIgnoreCase);
-        DateTimeOffset? globalMinTimestamp = null;
-        DateTimeOffset? globalMaxTimestamp = null;
+        var overallMin = DateTime.MaxValue;
+        var overallMax = DateTime.MinValue;
 
         foreach (var path in files)
         {
@@ -117,10 +127,11 @@ public class LogAnalyticsService
 
                     if (entry.Timestamp != default)
                     {
-                        if (globalMinTimestamp is null || entry.Timestamp < globalMinTimestamp)
-                            globalMinTimestamp = entry.Timestamp;
-                        if (globalMaxTimestamp is null || entry.Timestamp > globalMaxTimestamp)
-                            globalMaxTimestamp = entry.Timestamp;
+                        var tsUtc = entry.Timestamp.UtcDateTime;
+                        if (tsUtc < overallMin)
+                            overallMin = tsUtc;
+                        if (tsUtc > overallMax)
+                            overallMax = tsUtc;
                     }
                 }
             }
@@ -130,54 +141,70 @@ public class LogAnalyticsService
             }
         }
 
-        var totalHours = 0.0;
-        if (globalMinTimestamp is { } lo && globalMaxTimestamp is { } hi)
-        {
-            var span = hi - lo;
-            totalHours = span.TotalHours;
-            if (totalHours <= 0)
-                totalHours = 0;
-        }
+        var hasTimestampWindow = overallMin != DateTime.MaxValue;
+        var globalDensityHours = 0d;
+        if (hasTimestampWindow)
+            globalDensityHours = (overallMax - overallMin).TotalHours;
+
+        var densityHoursForThroughput = Math.Max(globalDensityHours, MinDensityHoursForThroughput);
 
         var results = accumulators
-            .Select(kvp => new ApiAnalyticsResponse
+            .Where(kvp =>
             {
-                RequestPath = kvp.Key,
-                CallCount = kvp.Value.CallCount,
-                ErrorCount = kvp.Value.ErrorCount,
-                ErrorBreakdown = kvp.Value.ErrorTypeCounts
-                    .OrderByDescending(x => x.Value)
-                    .ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => new ErrorDetail { ErrorType = x.Key, Count = x.Value })
-                    .ToArray(),
-                AverageCallsPerHour = totalHours > 0 ? kvp.Value.CallCount / totalHours : 0,
-                AverageElapsedMs = kvp.Value.ElapsedSampleCount > 0
+                _logMonitoring.TryGetPathBaselineStats(kvp.Key, out var pathBaseline);
+                var longThresholdMs = GetLongLatencyThresholdMs(pathBaseline);
+                var maxElapsedMs = kvp.Value.ElapsedSampleCount > 0 ? kvp.Value.MaxElapsed : 0d;
+                return kvp.Value.ErrorCount > 0 || maxElapsedMs > longThresholdMs;
+            })
+            .Select(kvp =>
+            {
+                var callsPerHour = kvp.Value.CallCount / densityHoursForThroughput;
+                var avgMs = kvp.Value.ElapsedSampleCount > 0
                     ? kvp.Value.SumElapsed / kvp.Value.ElapsedSampleCount
-                    : 0,
-                MaxElapsedMs = kvp.Value.ElapsedSampleCount > 0 ? kvp.Value.MaxElapsed : 0,
+                    : 0d;
+                var maxMs = kvp.Value.ElapsedSampleCount > 0 ? kvp.Value.MaxElapsed : 0d;
+
+                return new ApiAnalyticsResponse
+                {
+                    RequestPath = kvp.Key,
+                    CallCount = kvp.Value.CallCount,
+                    ErrorCount = kvp.Value.ErrorCount,
+                    ErrorBreakdown = kvp.Value.ErrorTypeCounts
+                        .OrderByDescending(x => x.Value)
+                        .ThenBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                        .Select(x => new ErrorDetail { ErrorType = x.Key, Count = x.Value })
+                        .ToArray(),
+                    AverageCallsPerHour = Math.Round(callsPerHour, 1, MidpointRounding.AwayFromZero),
+                    AverageElapsedMs = Math.Round(avgMs, 1, MidpointRounding.AwayFromZero),
+                    MaxElapsedMs = Math.Round(maxMs, 0, MidpointRounding.AwayFromZero),
+                };
             })
             .OrderByDescending(r => r.CallCount - r.ErrorCount)
             .ThenByDescending(r => r.CallCount)
             .ThenBy(r => r.RequestPath, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        await TryWriteAnalyticsHistorySnapshotAsync(
-                results,
-                totalHours,
-                globalMinTimestamp,
-                globalMaxTimestamp,
-                cancellationToken)
-            .ConfigureAwait(false);
+        var report = new AnalyticsReport
+        {
+            LogSampleWindowStartUtc = hasTimestampWindow ? overallMin : null,
+            LogSampleWindowEndUtc = hasTimestampWindow ? overallMax : null,
+            GlobalDensityHours = globalDensityHours,
+            FilterApplied = AnalyticsFilterApplied,
+            Stats = results,
+        };
 
-        return results;
+        await TryWriteAnalyticsHistorySnapshotAsync(report, cancellationToken).ConfigureAwait(false);
+
+        return report;
     }
 
-    private async Task TryWriteAnalyticsHistorySnapshotAsync(
-        IReadOnlyList<ApiAnalyticsResponse> stats,
-        double totalHours,
-        DateTimeOffset? logWindowStartUtc,
-        DateTimeOffset? logWindowEndUtc,
-        CancellationToken cancellationToken)
+    /// <summary>Latency outlier threshold: mean + 2σ when a baseline row exists; otherwise <see cref="FallbackLongLatencyThresholdMs"/>.</summary>
+    private static double GetLongLatencyThresholdMs(PathBaselineStats? pathBaseline) =>
+        pathBaseline is not null
+            ? pathBaseline.MeanMs + 2 * pathBaseline.StdDevMs
+            : FallbackLongLatencyThresholdMs;
+
+    private async Task TryWriteAnalyticsHistorySnapshotAsync(AnalyticsReport report, CancellationToken cancellationToken)
     {
         await _historyWriteGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -190,12 +217,13 @@ public class LogAnalyticsService
             {
                 CalculationTimestampUtc = DateTimeOffset.UtcNow,
                 SchemaVersion = "1.0",
-                StatsCount = stats.Count,
-                GlobalObservedHours = totalHours,
-                LogSampleWindowStartUtc = logWindowStartUtc,
-                LogSampleWindowEndUtc = logWindowEndUtc,
+                FilterApplied = report.FilterApplied,
+                StatsCount = report.Stats.Count,
+                LogSampleWindowStartUtc = report.LogSampleWindowStartUtc,
+                LogSampleWindowEndUtc = report.LogSampleWindowEndUtc,
+                GlobalDensityHours = report.GlobalDensityHours,
                 LogAnalyticsDirectory = ResolveLogDirectory(),
-                Stats = stats.ToList(),
+                Stats = report.Stats.ToList(),
             };
 
             await using var stream = new FileStream(
@@ -225,13 +253,15 @@ public class LogAnalyticsService
 
         public string SchemaVersion { get; init; } = "1.0";
 
+        public string FilterApplied { get; init; } = string.Empty;
+
         public int StatsCount { get; init; }
 
-        public double GlobalObservedHours { get; init; }
+        public DateTime? LogSampleWindowStartUtc { get; init; }
 
-        public DateTimeOffset? LogSampleWindowStartUtc { get; init; }
+        public DateTime? LogSampleWindowEndUtc { get; init; }
 
-        public DateTimeOffset? LogSampleWindowEndUtc { get; init; }
+        public double GlobalDensityHours { get; init; }
 
         /// <summary>Resolved <see cref="LogAnalyticsOptions.LogDirectory"/> used for this run (may be null if unconfigured).</summary>
         public string? LogAnalyticsDirectory { get; init; }

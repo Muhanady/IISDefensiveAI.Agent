@@ -28,7 +28,9 @@ builder.Services.AddSingleton<IISController>();
 builder.Services.AddSingleton<PostActionAuditService>();
 builder.Services.AddSingleton<AnomalyTelemetry>();
 builder.Services.AddSingleton<LogAnalyticsService>();
-builder.Services.AddHostedService<LogMonitoringService>();
+// Same LogMonitoringService instance for hosted execution and consumers (e.g. LogAnalyticsService).
+builder.Services.AddSingleton<LogMonitoringService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LogMonitoringService>());
 builder.Services.AddSingleton<NightlyLearningService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<NightlyLearningService>());
 
@@ -68,8 +70,8 @@ app.MapGet("/status", (IISController iis, IOptions<LogMonitoringOptions> opts, A
 
 app.MapGet("/analytics", async (LogAnalyticsService analytics, CancellationToken cancellationToken) =>
 {
-    var stats = await analytics.GetStatsAsync(cancellationToken).ConfigureAwait(false);
-    return Results.Json(stats);
+    var report = await analytics.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Json(report);
 });
 
 app.MapGet("/baseline", (IHostEnvironment env) =>
