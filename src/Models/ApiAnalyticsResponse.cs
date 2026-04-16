@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace IISDefensiveAI.Agent;
 
 public sealed class ErrorDetail
@@ -24,6 +26,10 @@ public sealed class ApiAnalyticsResponse
     public double AverageElapsedMs { get; init; }
 
     public double MaxElapsedMs { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonPropertyName("sourceFile")]
+    public string? SourceFile { get; init; }
 }
 
 /// <summary>Root payload for <c>GET /analytics</c> and JSON snapshot files (metadata + filtered stats).</summary>
@@ -35,7 +41,7 @@ public sealed class AnalyticsReport
     /// <summary>UTC timestamp of the latest log line included in aggregation (when any).</summary>
     public DateTime? LogSampleWindowEndUtc { get; init; }
 
-    /// <summary>Hours between first and last log entry timestamps (UTC) in the analyzed files (exact data span).</summary>
+    /// <summary>Hours between first and last log entry timestamps (UTC); rounded to 2 decimals in analytics exports and API payloads.</summary>
     public double GlobalDensityHours { get; init; }
 
     public string FilterApplied { get; init; } = string.Empty;
