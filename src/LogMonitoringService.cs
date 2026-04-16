@@ -248,7 +248,7 @@ public class LogMonitoringService : BackgroundService
 
     /// <summary>Matches <see cref="NightlyLearningService"/> path grouping.</summary>
     private static string NormalizeRequestPath(string? requestPath) =>
-        string.IsNullOrWhiteSpace(requestPath) ? "(unknown)" : requestPath.Trim();
+        RequestPathNormalizer.Normalize(requestPath);
 
     /// <summary>
     /// True when a baseline exists for the request path and latency is within mean ± 2σ (requires ≥2 samples and σ &gt; 0).
@@ -576,11 +576,44 @@ public class LogMonitoringService : BackgroundService
         if (_options.EnableAutoRca)
             ScheduleCriticalAnomalyRootCauseLogging(entry);
 
-        var poolName = _options.AnomalyReactionAppPoolName?.Trim();
+        var normalizedPath = RequestPathNormalizer.Normalize(entry.Properties?.RequestPath);
+        if (string.Equals(normalizedPath, "(unknown)", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "Critical anomaly: request path is unknown; cannot resolve IIS application pool for remediation.");
+            return;
+        }
+
+        var poolName = _iisController.GetAppPoolNameForPath(normalizedPath);
         if (string.IsNullOrEmpty(poolName))
         {
             _logger.LogWarning(
-                "Critical anomaly: no AnomalyReactionAppPoolName is configured; skipping IIS status check and recycle.");
+                "Critical anomaly: no IIS application matched request path {RequestPath}; skipping recycle.",
+                normalizedPath);
+            return;
+        }
+
+        var authorized = _options.AuthorizedAppPools ?? new List<string>();
+        var isAuthorized = authorized.Any(p =>
+            !string.IsNullOrWhiteSpace(p) && string.Equals(p.Trim(), poolName, StringComparison.OrdinalIgnoreCase));
+
+        if (!isAuthorized)
+        {
+            if (authorized.Count == 0)
+            {
+                _logger.LogWarning(
+                    "Critical anomaly: resolved pool {PoolName} for path {RequestPath}, but AuthorizedAppPools is empty; skipping recycle.",
+                    poolName,
+                    normalizedPath);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Critical anomaly: resolved pool {PoolName} for path {RequestPath} is not in AuthorizedAppPools; skipping recycle.",
+                    poolName,
+                    normalizedPath);
+            }
+
             return;
         }
 

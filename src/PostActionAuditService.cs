@@ -232,7 +232,7 @@ public sealed class PostActionAuditService : IDisposable
     }
 
     private static string NormalizeRequestPath(string? requestPath) =>
-        string.IsNullOrWhiteSpace(requestPath) ? "(unknown)" : requestPath.Trim();
+        RequestPathNormalizer.Normalize(requestPath);
 
     public void Dispose()
     {

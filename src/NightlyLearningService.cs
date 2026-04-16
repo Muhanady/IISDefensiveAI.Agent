@@ -294,7 +294,7 @@ public class NightlyLearningService : IHostedService
             .Select(e =>
             {
                 var path = e.Properties!.RequestPath;
-                var key = string.IsNullOrWhiteSpace(path) ? "(unknown)" : path.Trim();
+                var key = RequestPathNormalizer.Normalize(path);
                 return (Path: key, Ms: e.Properties!.ElapsedMilliseconds!.Value);
             })
             .ToList();

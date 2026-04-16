@@ -10,8 +10,11 @@ public class LogMonitoringOptions
     /// <summary>File name filter for <see cref="FileSystemWatcher"/> (e.g. *.log, *.json).</summary>
     public string FileFilter { get; set; } = "*.json";
 
-    /// <summary>IIS application pool to inspect/recycle when a critical anomaly is detected (optional).</summary>
-    public string? AnomalyReactionAppPoolName { get; set; }
+    /// <summary>
+    /// Allow-list of application pool names eligible for automatic recycle after a critical anomaly.
+    /// The pool is resolved from the log request path via IIS site/application mapping; empty list disables recycle.
+    /// </summary>
+    public List<string> AuthorizedAppPools { get; set; } = new();
 
     /// <summary>How far back to look for SQL timeout signals when evaluating a critical anomaly.</summary>
     public int SqlTimeoutLookbackMinutes { get; set; } = 10;

@@ -57,7 +57,7 @@ public class IISController
     /// <summary>Records a path/latency pair as benign (false positive) for anomaly suppression and nightly baseline augmentation.</summary>
     public void MarkAsSafe(string requestPath, double latency)
     {
-        var normalized = string.IsNullOrWhiteSpace(requestPath) ? "(unknown)" : requestPath.Trim();
+        var normalized = RequestPathNormalizer.Normalize(requestPath);
 
         lock (_feedbackLock)
         {
@@ -88,7 +88,7 @@ public class IISController
         lock (_feedbackLock)
         {
             RefreshSafeFeedbackFromDisk_NoLock();
-            var key = string.IsNullOrWhiteSpace(requestPath) ? "(unknown)" : requestPath.Trim();
+            var key = RequestPathNormalizer.Normalize(requestPath);
 
             foreach (var e in _safeFeedbackEntries)
             {
@@ -189,6 +189,108 @@ public class IISController
             ElapsedMilliseconds = e.LatencyMs,
         },
     };
+
+    /// <summary>Enumerates all IIS application pools and their current state.</summary>
+    public List<AppPoolStatus> GetAppPoolStatuses()
+    {
+        if (!OperatingSystem.IsWindows())
+            return new List<AppPoolStatus> { new("(IIS)", "Unavailable") };
+
+        try
+        {
+            using var serverManager = new ServerManager();
+            var list = new List<AppPoolStatus>(serverManager.ApplicationPools.Count);
+            foreach (var pool in serverManager.ApplicationPools)
+                list.Add(new AppPoolStatus(pool.Name, pool.State.ToString()));
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to enumerate IIS application pools.");
+            return new List<AppPoolStatus> { new("(IIS)", $"Error:{ex.GetType().Name}") };
+        }
+    }
+
+    /// <summary>
+    /// Resolves the IIS application pool for a URL request path by longest-prefix match against each site's virtual applications.
+    /// </summary>
+    public string? GetAppPoolNameForPath(string requestPath)
+    {
+        if (!OperatingSystem.IsWindows())
+            return null;
+
+        if (string.IsNullOrWhiteSpace(requestPath) || string.Equals(requestPath, "(unknown)", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var normalizedRequest = NormalizeIisVirtualPath(requestPath);
+
+        try
+        {
+            using var serverManager = new ServerManager();
+            string? bestPool = null;
+            var bestLen = -1;
+
+            foreach (var site in serverManager.Sites)
+            {
+                foreach (var app in site.Applications)
+                {
+                    var appPath = NormalizeIisVirtualPath(app.Path);
+                    if (!VirtualPathMatchesRequest(normalizedRequest, appPath))
+                        continue;
+
+                    var pool = app.ApplicationPoolName?.Trim();
+                    if (string.IsNullOrEmpty(pool))
+                        continue;
+
+                    if (appPath.Length > bestLen)
+                    {
+                        bestLen = appPath.Length;
+                        bestPool = pool;
+                    }
+                }
+            }
+
+            if (bestPool is null)
+                _logger.LogDebug("No IIS application matched request path {RequestPath} (normalized: {Normalized}).", requestPath, normalizedRequest);
+
+            return bestPool;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to resolve application pool for request path {RequestPath}", requestPath);
+            return null;
+        }
+    }
+
+    private static string NormalizeIisVirtualPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return "/";
+
+        var s = path.Trim().Replace('\\', '/');
+        while (s.Contains("//", StringComparison.Ordinal))
+            s = s.Replace("//", "/", StringComparison.Ordinal);
+
+        if (!s.StartsWith('/'))
+            s = "/" + s;
+
+        while (s.Length > 1 && s.EndsWith('/'))
+            s = s[..^1];
+
+        return s.Length == 0 ? "/" : s;
+    }
+
+    private static bool VirtualPathMatchesRequest(string normalizedRequest, string normalizedAppPath)
+    {
+        if (string.Equals(normalizedRequest, normalizedAppPath, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedAppPath == "/")
+            return normalizedRequest.Length > 0;
+
+        return normalizedRequest.StartsWith(normalizedAppPath + "/", StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>Returns a human-readable status for the pool, or an error/not-found description.</summary>
     public string GetAppPoolStatus(string poolName)

@@ -15,6 +15,7 @@ if (OperatingSystem.IsWindows())
 }
 
 builder.Services.Configure<LogMonitoringOptions>(builder.Configuration.GetSection(LogMonitoringOptions.SectionName));
+builder.Services.Configure<LogAnalyticsOptions>(builder.Configuration.GetSection(LogAnalyticsOptions.SectionName));
 builder.Services.Configure<DiagnosticReasoningOptions>(builder.Configuration.GetSection(DiagnosticReasoningOptions.SectionName));
 builder.Services.AddHttpClient<DiagnosticReasoningService>((sp, client) =>
 {
@@ -26,6 +27,7 @@ builder.Services.AddHttpClient<DiagnosticReasoningService>((sp, client) =>
 builder.Services.AddSingleton<IISController>();
 builder.Services.AddSingleton<PostActionAuditService>();
 builder.Services.AddSingleton<AnomalyTelemetry>();
+builder.Services.AddSingleton<LogAnalyticsService>();
 builder.Services.AddHostedService<LogMonitoringService>();
 builder.Services.AddSingleton<NightlyLearningService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<NightlyLearningService>());
@@ -34,17 +36,40 @@ var app = builder.Build();
 
 app.MapGet("/status", (IISController iis, IOptions<LogMonitoringOptions> opts, AnomalyTelemetry telemetry) =>
 {
-    var pool = opts.Value.AnomalyReactionAppPoolName?.Trim();
-    var status = string.IsNullOrEmpty(pool)
-        ? "not_configured"
-        : iis.GetAppPoolStatus(pool);
+    var authorized = (opts.Value.AuthorizedAppPools ?? new List<string>())
+        .Where(s => !string.IsNullOrWhiteSpace(s))
+        .Select(s => s.Trim())
+        .ToList();
+
+    if (authorized.Count == 0)
+    {
+        var allPools = iis.GetAppPoolStatuses();
+        return Results.Json(new AgentStatusResponse
+        {
+            AppPoolName = null,
+            AppPoolStatus = "no_authorized_pools",
+            AppPools = allPools,
+            RecentAnomalies = telemetry.GetRecent(),
+        });
+    }
+
+    var appPools = authorized
+        .Select(name => new AppPoolStatus(name, iis.GetAppPoolStatus(name)))
+        .ToList();
 
     return Results.Json(new AgentStatusResponse
     {
-        AppPoolName = string.IsNullOrEmpty(pool) ? null : pool,
-        AppPoolStatus = status,
+        AppPoolName = authorized.Count == 1 ? authorized[0] : null,
+        AppPoolStatus = "authorized",
+        AppPools = appPools,
         RecentAnomalies = telemetry.GetRecent(),
     });
+});
+
+app.MapGet("/analytics", async (LogAnalyticsService analytics, CancellationToken cancellationToken) =>
+{
+    var stats = await analytics.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+    return Results.Json(stats);
 });
 
 app.MapGet("/baseline", (IHostEnvironment env) =>
